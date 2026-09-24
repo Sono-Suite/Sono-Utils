@@ -633,10 +633,7 @@ function startSonoOverlayProcess(overlayDir, overlayPath, adminNeeded, bypass) {
     } catch (error) {
       console.error('Failed to run as admin or user denied permissions:', error.message);
     }
-    if(!bypass){
-    initMenuInputEngine();
-
-    }
+    initMenuInputEngine()
     returnToMenu();
   } else {
     const overlayProcess = spawn(overlayPath, [], {
@@ -647,7 +644,7 @@ function startSonoOverlayProcess(overlayDir, overlayPath, adminNeeded, bypass) {
     overlayProcess.on('close', (code) => {
       console.log(`\n👋 Sono-Overlay completed or closed (Code: ${code}).`);
       initMenuInputEngine();
-      returnToMenu();
+      returnToMenu(bypass);
     });
 
     overlayProcess.on('error', (err) => {
@@ -670,20 +667,26 @@ function renderMenu() {
   });
 }
 
-function returnToMenu() {
-  process.stdout.write('\n\x1b[33mPress any key to return to main menu...\x1b[0m');
-  process.stdin.removeListener('data', onRawConsoleDataInput);
-
-  const tempHandler = () => {
-    process.stdin.removeListener('data', tempHandler);
+function returnToMenu(bypass) {
+  if (bypass) {
     initMenuInputEngine();
     renderMenu();
-  };
+  } else {
 
-  // 100ms timeout prevents previous Enter-key buffer sequences from auto-triggering the prompt page context
-  setTimeout(() => {
-    process.stdin.on('data', tempHandler);
-  }, 100);
+    process.stdout.write('\n\x1b[33mPress any key to return to main menu...\x1b[0m');
+    process.stdin.removeListener('data', onRawConsoleDataInput);
+
+    const tempHandler = () => {
+      process.stdin.removeListener('data', tempHandler);
+      initMenuInputEngine();
+      renderMenu();
+    };
+
+    // 100ms timeout prevents previous Enter-key buffer sequences from auto-triggering the prompt page context
+    setTimeout(() => {
+      process.stdin.on('data', tempHandler);
+    }, 100);
+  }
 }
 
 // Automatically scrubs loose, half-downloaded or corrupted temp files from previous sessions
