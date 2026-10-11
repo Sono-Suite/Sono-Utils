@@ -13,6 +13,8 @@ const https = require('https');
 const { release } = require('os');
 const ver = "1.0.3"
 
+// What menu items to use
+// this is probably a bad idea
 const MENU_ITEMS = [
   'Launch Sonolus Server',
   'Launch Sono-Overlay',
@@ -21,6 +23,7 @@ const MENU_ITEMS = [
   'Launch Sono-AviUtl',
   'Launch Sono-Charts',
   'Update All Subsystems', // Added Update Option
+  'Update Sono-Utils',
   'Credits',
   'Disclaimers',
   'Exit Launcher'
@@ -143,11 +146,14 @@ function handleSelection(label) {
     console.log(`--- Credits: ---\n`);
     console.log("- This Wrapper: @Nexint");
     console.log("- Sonolus Server: @Nexint");
-    console.log("- Sono-Overlay: @Nexint, forked from @TootieJin");
+    console.log("- Sono-Overlay + Sekai-Overlay: @Nexint, forked from @TootieJin");
+    console.log("- Sono-Renderer (future project): Codex + @Nexint");
     console.log("- YT-DLP: Various Coders");
     console.log("");
     console.log("The goal of this project is to provide an easy to use manual for ALL of your charting needs!");
     console.log("- SonoUtils (the wrapper) is licensed under the Apache 2.0");
+    console.log("- Sono-Renderer is under the BSD-3.");
+    console.log("- Sono-AviUtl is under the MIT.");
     console.log("- Sono-Overlay and Sekai-Overlay is under the AGPL");
     console.log("- YT-DLP is under the Unlicense");
     console.log("- ProSeka Faithful and Sono-Server is under the Nexint TOS");
