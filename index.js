@@ -242,6 +242,8 @@ function handleSelection(label) {
   }
 }
 
+
+
 // Hardened, production-ready configuration dependency router
 function verifyAssetDependency(workingDir, assetKey, onReadyCallback, forceDownload = false) {
   const addonsDir = path.join(workingDir, 'addons');
@@ -496,31 +498,146 @@ function extractArchivedSubcomponent(archivePath, addonsDir, targetFilePath, tar
   }
 }
 
-function runMediaDownloader(workingDir) {
-  const addons = path.join(workingDir, 'addons'), dist = path.join(workingDir, 'dist', 'downloads');
+// Execute a subprocess without shell interpolation, preserving its exit status.
+function runMediaProcess(binary, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { stdio: 'inherit', ...options });
+    child.once('error', reject);
+    child.once('close', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`${path.basename(binary)} exited with ${signal || `code ${code}`}`));
+    });
+  });
+}
+
+function probeVideo(ffprobe, inputFile) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(ffprobe, [
+      '-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=width,height,avg_frame_rate,r_frame_rate',
+      '-of', 'json', inputFile
+    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', data => stdout += data);
+    child.stderr.on('data', data => stderr += data);
+    child.once('error', reject);
+    child.once('close', code => {
+      if (code !== 0) return reject(new Error(`ffprobe failed: ${stderr.trim()}`));
+      try {
+        const stream = JSON.parse(stdout).streams?.[0];
+        if (!stream) throw new Error('No video stream found');
+        resolve(stream);
+      } catch (err) { reject(err); }
+    });
+  });
+}
+
+async function downloadMediaAndConvert(workingDir, url, videoMode) {
+  // Define some constants
+  const addons = path.join(workingDir, 'addons');
+  const dist = path.join(workingDir, 'dist', 'downloads');
+  const conv = path.join(workingDir, 'dist', 'conv');
+  const extension = process.platform === 'win32' ? '.exe' : '';
+  const ytDlp = path.join(addons, `yt-dlp${extension}`);
+  const ffmpeg = path.join(addons, `ffmpeg${extension}`);
+  const ffprobe = path.join(addons, `ffprobe${extension}`);
+
+  // Make folders if they dont exist
   fs.mkdirSync(dist, { recursive: true });
+  fs.mkdirSync(conv, { recursive: true });
 
-  const binaryName = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+  // yt-dlp writes the final post-processed filename to a dedicated file.
+  // This avoids parsing progress messages and works when merging changes extensions.
+  const jobId = require('crypto').randomBytes(8).toString('hex');
+  const pathRecord = path.join(dist, `.yt-dlp-${jobId}.txt`);
+  const outputTemplate = path.join(dist, `%(title)s_${jobId}.%(ext)s`);
+  const args = [
+    '--ffmpeg-location', addons,
+    '--no-playlist', '--restrict-filenames',
+    '--print-to-file', 'after_move:filepath', pathRecord,
+    '-f', videoMode
+      ? 'bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b'
+      : 'ba/b',
+    '-o', outputTemplate
+  ];
+  if (videoMode) args.push('--merge-output-format', 'mp4');
+  else args.push('-x', '--audio-format', 'mp3');
+  args.push(url);
 
+  try {
+    console.log('\n--- Downloading media with yt-dlp ---\n');
+    await runMediaProcess(ytDlp, args, { stdio: ['ignore', 'inherit', 'inherit'] });
+    const inputFile = fs.readFileSync(pathRecord, 'utf8').trim();
+    if (!inputFile) {
+      throw new Error('yt-dlp did not report a final output path');
+    }
+    if (!fs.existsSync(inputFile)) throw new Error(`Downloaded file not found: ${inputFile}`);
+
+    if (!videoMode) {
+      console.log(`\nAudio saved: ${inputFile}`);
+      return;
+    }
+
+    const stream = await probeVideo(ffprobe, inputFile);
+    console.log(`\nInput: ${stream.width}x${stream.height}, avg FPS ${stream.avg_frame_rate}, nominal FPS ${stream.r_frame_rate}`);
+    console.log('Converting to constant 60 FPS.');
+
+    const parsed = path.parse(inputFile);
+    const finalFile = path.join(conv, `${parsed.name}_CFR60.mp4`);
+    const temporaryFile = path.join(conv, `${parsed.name}_CFR60.${jobId}.partial.mp4`);
+    if (fs.existsSync(finalFile)) throw new Error(`Output already exists: ${finalFile}`);
+
+    try {
+      await runMediaProcess(ffmpeg, [
+        '-hide_banner', '-nostdin', '-n', '-i', inputFile,
+        '-map', '0:v:0', '-map', '0:a?',
+        '-vf', 'fps=60', '-fps_mode', 'cfr',
+        '-c:v', 'libx264', '-preset', 'medium', '-crf', '17',
+        '-pix_fmt', 'yuv420p', '-c:a', 'copy',
+        '-movflags', '+faststart', temporaryFile
+      ], { stdio: ['ignore', 'inherit', 'inherit'] });
+      const converted = await probeVideo(ffprobe, temporaryFile);
+      if (!converted.width || !converted.height || fs.statSync(temporaryFile).size === 0) {
+        throw new Error('Output verification failed');
+      }
+      fs.renameSync(temporaryFile, finalFile);
+      console.log(`\nCFR video saved: ${finalFile}`);
+      console.log(`Original download: ${inputFile}`);
+    } catch (err) {
+      try { fs.unlinkSync(temporaryFile); } catch (_) { /* no partial file */ }
+      throw err;
+    }
+  } finally {
+    try { fs.unlinkSync(pathRecord); } catch (_) { /* no record created */ }
+  }
+}
+
+function runMediaDownloader(workingDir) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  rl.question('Enter video URL (or type "exit"):\n> ', (url) => {
-    if (url.trim().toLowerCase() === 'exit' || !url.trim()) {
+  rl.question('Enter video URL (or type "exit"):\n> ', url => {
+    if (!url.trim() || url.trim().toLowerCase() === 'exit') {
       rl.close();
-      process.stdin.resume();
       initMenuInputEngine();
       renderMenu();
       return;
     }
-    rl.question(`\n1: Audio (mp3) | 2: Video (mp4)\n> `, (mode) => {
-      let args = ['--ffmpeg-location', addons, '--restrict-filenames', '-f', mode.trim() === '2' ? 'bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b' : 'ba/b', '-o', path.join(dist, `%(title)s_${Math.floor(Date.now() / 1000)}.%(ext)s`), url.trim()];
-      if (mode.trim() !== '2') args.splice(5, 0, '-x', '--audio-format', 'mp3');
-
-      rl.close();
-
-      executeIsolatedProcess(path.join(addons, binaryName), args, 'YT-DLP Subsystem', {}, () => {
-        process.stdin.resume();
+    rl.question('\n1: Audio (mp3) | 2: Video (mp4, CFR 60 FPS)\n> ', mode => {
+      const videoMode = mode.trim() === '2';
+      if (!videoMode && mode.trim() !== '1') {
+        console.error('Invalid selection.');
+        rl.close();
         returnToMenu();
-      });
+        return;
+      }
+      rl.close();
+      downloadMediaAndConvert(workingDir, url.trim(), videoMode)
+        .catch(err => console.error(`\n[Media Pipeline Error] ${err.message}`))
+        .finally(() => {
+          process.stdin.resume();
+          returnToMenu();
+        });
     });
   });
 }
